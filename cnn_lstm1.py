@@ -11,14 +11,18 @@ import matplotlib.pyplot as plt
 from data_utils import load_data_from_files, prepare_data, balance_classes, prepare_cross_validation_data
 
 # Device configuration
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda:0" )
+# print(device)
+
+import os
 
 
 def plot_learning_curves(train_losses, val_losses, val_accuracies, val_f1s, fold):
     """
     Plot learning curves for a single fold with improved colors and save to file
     """
-    plt.style.use('seaborn')  # Use seaborn style for better looking plots
+    # Remove seaborn style
+    plt.style.use('default')  # Use default style instead
 
     fig = plt.figure(figsize=(15, 5))
 
@@ -44,8 +48,12 @@ def plot_learning_curves(train_losses, val_losses, val_accuracies, val_f1s, fold
 
     plt.tight_layout()
 
+    # Define save path
+    save_path = r"D:\Model101\.venv\Scripts"
+    # Create directory if it doesn't exist
+    os.makedirs(save_path, exist_ok=True)
     # Save the plot
-    plt.savefig(f'fold_{fold + 1}_learning_curves.png', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, f'fold_{fold + 1}_learning_curves.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -54,7 +62,9 @@ def plot_average_curves(all_folds_train_losses, all_folds_val_losses,
     """
     Plot average learning curves across all folds with improved colors and save to file
     """
-    plt.style.use('seaborn')
+    # Remove seaborn style
+    plt.style.use('default')  # Use default style instead
+
     fig = plt.figure(figsize=(15, 5))
 
     # Plot average losses
@@ -109,8 +119,12 @@ def plot_average_curves(all_folds_train_losses, all_folds_val_losses,
 
     plt.tight_layout()
 
+    # Define save path
+    save_path = r"D:\Model101\.venv\Scripts"
+    # Create directory if it doesn't exist
+    os.makedirs(save_path, exist_ok=True)
     # Save the plot
-    plt.savefig('average_learning_curves.png', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, 'average_learning_curves.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 class CNN(nn.Module):
@@ -194,7 +208,7 @@ def train_and_evaluate_cv(X, y, n_splits=5):
         'hidden_size': 256,
         'batch_size': 32,
         'learning_rate': 0.0005,
-        'num_epochs': 100,
+        'num_epochs': 1000,
         'dropout_rate': 0.3
     }
 
@@ -203,16 +217,27 @@ def train_and_evaluate_cv(X, y, n_splits=5):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Lists to store all folds data for average plots
+    all_folds_train_losses = []
+    all_folds_val_losses = []
+    all_folds_val_accuracies = []
+    all_folds_val_f1s = []
+
     # Perform cross validation
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
         print(f"\nFold {fold + 1}/{n_splits}")
         print("-" * 50)
 
-        # Split data for this fold
+        # Lists to store metrics for current fold
+        train_losses = []
+        val_losses = []
+        val_accuracies = []
+        val_f1s = []
+
+        # [Original data preparation code remains unchanged...]
         X_train, X_val = X[train_idx], X[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
 
-        # Normalize the data
         scaler = StandardScaler()
         X_train_reshaped = X_train.reshape(-1, X_train.shape[-1])
         X_val_reshaped = X_val.reshape(-1, X_val.shape[-1])
@@ -223,20 +248,17 @@ def train_and_evaluate_cv(X, y, n_splits=5):
         X_train_normalized = X_train_normalized.reshape(X_train.shape)
         X_val_normalized = X_val_normalized.reshape(X_val.shape)
 
-        # Convert to tensor
         X_train_tensor = torch.FloatTensor(X_train_normalized).to(device)
         y_train_tensor = torch.LongTensor(y_train.numpy()).to(device)
         X_val_tensor = torch.FloatTensor(X_val_normalized).to(device)
         y_val_tensor = torch.LongTensor(y_val.numpy()).to(device)
 
-        # Calculate class weights for this fold
         class_weights = compute_class_weight(
             class_weight='balanced',
             classes=np.unique(y_train.numpy()),
             y=y_train.numpy()
         )
 
-        # Initialize model
         model = CNN_LSTM(
             sequence_length=20,
             hidden_size=config['hidden_size'],
@@ -248,20 +270,19 @@ def train_and_evaluate_cv(X, y, n_splits=5):
         )
         optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
 
-        # Create data loaders
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
         train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
         val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
         val_loader = DataLoader(val_dataset, batch_size=config['batch_size'])
 
-        # Training
         best_val_f1 = 0
         best_model_state = None
 
         for epoch in range(config['num_epochs']):
             # Training phase
             model.train()
-            total_loss = 0
+            total_train_loss = 0
+            total_val_loss = 0
 
             for sequences, labels in train_loader:
                 optimizer.zero_grad()
@@ -269,9 +290,10 @@ def train_and_evaluate_cv(X, y, n_splits=5):
                 loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
-                total_loss += loss.item()
+                total_train_loss += loss.item()
 
-            avg_loss = total_loss / len(train_loader)
+            avg_train_loss = total_train_loss / len(train_loader)
+            train_losses.append(avg_train_loss)
 
             # Validation phase
             model.eval()
@@ -281,24 +303,39 @@ def train_and_evaluate_cv(X, y, n_splits=5):
             with torch.no_grad():
                 for sequences, labels in val_loader:
                     outputs = model(sequences)
+                    loss = criterion(outputs, labels)
+                    total_val_loss += loss.item()
                     _, predicted = torch.max(outputs.data, 1)
                     val_preds.extend(predicted.cpu().numpy())
                     val_labels.extend(labels.cpu().numpy())
 
-            # Calculate metrics
-            val_accuracy = accuracy_score(val_labels, val_preds)
-            val_f1 = f1_score(val_labels, val_preds, average='weighted')
+            avg_val_loss = total_val_loss / len(val_loader)
+            val_losses.append(avg_val_loss)
 
-            # Save best model
+            val_accuracy = accuracy_score(val_labels, val_preds)
+            val_accuracies.append(val_accuracy)
+
+            val_f1 = f1_score(val_labels, val_preds, average='weighted')
+            val_f1s.append(val_f1)
+
             if val_f1 > best_val_f1:
                 best_val_f1 = val_f1
                 best_model_state = model.state_dict().copy()
 
-            if (epoch + 1) % 10 == 0:
-                print(f'Epoch [{epoch + 1}/{config["num_epochs"]}], '
-                      f'Loss: {avg_loss:.4f}, Val Accuracy: {val_accuracy:.4f}, Val F1: {val_f1:.4f}')
+            print(f'Epoch [{epoch + 1}/{config["num_epochs"]}], '
+                  f'Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, '
+                  f'Val Accuracy: {val_accuracy:.4f}, Val F1: {val_f1:.4f}')
 
-        # Load best model and compute final metrics
+        # Plot learning curves for this fold
+        plot_learning_curves(train_losses, val_losses, val_accuracies, val_f1s, fold)
+
+        # Store metrics for average plots
+        all_folds_train_losses.append(train_losses)
+        all_folds_val_losses.append(val_losses)
+        all_folds_val_accuracies.append(val_accuracies)
+        all_folds_val_f1s.append(val_f1s)
+
+        # [Original final evaluation code remains unchanged...]
         model.load_state_dict(best_model_state)
         model.eval()
         final_preds = []
@@ -311,7 +348,6 @@ def train_and_evaluate_cv(X, y, n_splits=5):
                 final_preds.extend(predicted.cpu().numpy())
                 final_labels.extend(labels.cpu().numpy())
 
-        # Calculate and store final metrics for this fold
         fold_metrics.append({
             'accuracy': accuracy_score(final_labels, final_preds),
             'f1': f1_score(final_labels, final_preds, average='weighted'),
@@ -324,7 +360,10 @@ def train_and_evaluate_cv(X, y, n_splits=5):
         print("\nClassification Report:")
         print(fold_metrics[-1]['classification_report'])
 
-    # Calculate and print average metrics across all folds
+    # Plot average curves across all folds
+    plot_average_curves(all_folds_train_losses, all_folds_val_losses,
+                        all_folds_val_accuracies, all_folds_val_f1s, config)
+
     print("\nAverage Metrics Across All Folds:")
     print(
         f"Average Accuracy: {np.mean([m['accuracy'] for m in fold_metrics]):.4f} ± {np.std([m['accuracy'] for m in fold_metrics]):.4f}")
@@ -332,7 +371,6 @@ def train_and_evaluate_cv(X, y, n_splits=5):
         f"Average F1 Score: {np.mean([m['f1'] for m in fold_metrics]):.4f} ± {np.std([m['f1'] for m in fold_metrics]):.4f}")
 
     return fold_metrics
-
 
 if __name__ == "__main__":
     # Prepare data
