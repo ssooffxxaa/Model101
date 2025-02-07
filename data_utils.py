@@ -8,7 +8,7 @@ from sklearn.utils import resample
 from typing import Dict, List, Tuple
 
 # กำหนดพาทของโฟลเดอร์ที่เก็บข้อมูล
-BASE_DATA_PATH = r"C:\CNNLSTM\scripts\separated_data"
+BASE_DATA_PATH = r"D:\Model1101\.venv\Scripts\separated_data"
 
 
 def get_class_name(feature_value: int) -> str:
