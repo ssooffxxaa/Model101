@@ -2,12 +2,13 @@ import os
 import pandas as pd
 import torch
 import numpy as np
+from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 from sklearn.utils import resample
 from typing import Dict, List, Tuple
 
 # กำหนดพาทของโฟลเดอร์ที่เก็บข้อมูล
-BASE_DATA_PATH = r"D:\Model101\.venv\Scripts\separated_data"
+BASE_DATA_PATH = r"D:\Model1101\.venv\Scripts\separated_data"
 
 
 def get_class_name(feature_value: int) -> str:
@@ -119,12 +120,13 @@ def prepare_data(features: np.ndarray, labels: np.ndarray, window_size: int = 20
     return X, y
 
 
-def prepare_cross_validation_data():
+def prepare_train_test_data() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]:
     """
-    เตรียมข้อมูลสำหรับ cross validation โดยไม่แบ่ง train/test
+    เตรียมข้อมูลสำหรับการเทรนและทดสอบ
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: (X_balanced, y_balanced)
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray]:
+        (X_train, X_test, y_train, y_test, class_weights)
     """
     # โหลดข้อมูลจากไฟล์
     features, labels = load_data_from_files()
@@ -146,10 +148,50 @@ def prepare_cross_validation_data():
     for label, count in zip(unique_labels, counts):
         print(f"Class {label} ({get_class_name(label)}): {count} samples ({count / len(y_balanced) * 100:.2f}%)")
 
-    return X_balanced, y_balanced
+    # แบ่งข้อมูลตามคลาส
+    X_classes = [X_balanced[y_balanced == i] for i in range(len(unique_labels))]
+    y_classes = [y_balanced[y_balanced == i] for i in range(len(unique_labels))]
+
+    # ทำ stratified split
+    X_train, X_test, y_train, y_test = [], [], [], []
+    for X_class, y_class in zip(X_classes, y_classes):
+        X_train_class, X_test_class, y_train_class, y_test_class = train_test_split(
+            X_class, y_class, test_size=0.2, random_state=42
+        )
+        X_train.append(X_train_class)
+        X_test.append(X_test_class)
+        y_train.append(y_train_class)
+        y_test.append(y_test_class)
+
+    # รวมข้อมูล
+    X_train = torch.cat(X_train)
+    X_test = torch.cat(X_test)
+    y_train = torch.cat(y_train)
+    y_test = torch.cat(y_test)
+
+    # คำนวณ class weights
+    class_weights = compute_class_weight(
+        class_weight='balanced',
+        classes=np.unique(y_balanced.numpy()),
+        y=y_balanced.numpy()
+    )
+
+    print("\n--------------------------------------------------------")
+    print("\nFinal class distribution:")
+    print("\nTraining set:")
+    unique_labels_train, counts_train = np.unique(y_train.numpy(), return_counts=True)
+    for label, count in zip(unique_labels_train, counts_train):
+        print(f"Class {label} ({get_class_name(label)}): {count} samples ({count / len(y_train) * 100:.2f}%)")
+
+    print("\nTest set:")
+    unique_labels_test, counts_test = np.unique(y_test.numpy(), return_counts=True)
+    for label, count in zip(unique_labels_test, counts_test):
+        print(f"Class {label} ({get_class_name(label)}): {count} samples ({count / len(y_test) * 100:.2f}%)")
+
+    return X_train, X_test, y_train, y_test, class_weights
 
 
 if __name__ == "__main__":
-    X, y = prepare_cross_validation_data()
+    X_train, X_test, y_train, y_test, class_weights = prepare_train_test_data()
     print("\nPreprocessing completed successfully!")
     print("\n--------------------------------------------------------")
