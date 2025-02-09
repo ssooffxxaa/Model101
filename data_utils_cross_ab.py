@@ -19,7 +19,7 @@ def get_class_name(feature_value: int) -> str:
 
 def load_and_separate_data():
     """โหลดและแยกข้อมูลปกติและไม่ปกติ"""
-    BASE_DATA_PATH = r"D:\Model101\.venv\Scripts\separated_data"
+    BASE_DATA_PATH = r"D:\Model1101\.venv\Scripts\separated_data"
 
     normal_data = []
     normal_labels = []
