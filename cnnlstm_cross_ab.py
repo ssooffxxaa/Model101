@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import accuracy_score, f1_score, classification_report
+from sklearn.metrics import accuracy_score, f1_score, classification_report, precision_score, recall_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from data_utils import prepare_train_test_data
+from data_utils_cross_ab import prepare_train_test_data
 
 # Device configuration
 # device = torch.device("cuda:0" )
@@ -128,7 +128,7 @@ def plot_average_curves(all_folds_train_losses, all_folds_val_losses,
     plt.close()
 
 class CNN(nn.Module):
-    def __init__(self, input_channels=768, dropout_rate=0.3):
+    def __init__(self, input_channels=768, dropout_rate=0.287231916311793):
         super().__init__()
         self.feature_reduction = nn.Sequential(
             # First CNN block
@@ -158,13 +158,11 @@ class CNN(nn.Module):
 
 
 class CNN_LSTM(nn.Module):
-    def __init__(self, sequence_length=20, input_channels=768, hidden_size=256,
-                 num_classes=4, num_lstm_layers=2, dropout_rate=0.3):
+    def __init__(self, sequence_length=20, input_channels=768, hidden_size=68,
+                 num_classes=4, num_lstm_layers=4, dropout_rate=0.287231916311793):
         super().__init__()
 
-        self.cnn = CNN(input_channels, dropout_rate)
-        self.sequence_length = sequence_length
-        self.hidden_size = hidden_size
+        self.cnn = CNN(input_channels, dropout_rate=dropout_rate)
 
         self.lstm = nn.LSTM(
             input_size=self.cnn.output_channels,
@@ -176,9 +174,11 @@ class CNN_LSTM(nn.Module):
         )
 
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size * 2, 32),
+            nn.Linear(hidden_size * 2, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Linear(32, num_classes)
+            nn.Dropout(dropout_rate),
+            nn.Linear(64, num_classes)
         )
 
     def forward(self, x):
@@ -198,17 +198,18 @@ class CNN_LSTM(nn.Module):
 
 def train_and_evaluate_cv(X_train, y_train, X_test, y_test, n_splits=5):
     """
-    Train and evaluate model using cross validation on training data only,
-    then evaluate on test set.
+    Train and evaluate model using cross validation with updated parameters
     """
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     config = {
-        'hidden_size': 256,
-        'batch_size': 32,
-        'learning_rate': 0.0005,
-        'num_epochs': 100,
-        'dropout_rate': 0.3
+        'hidden_size': 68,
+        'batch_size': 42,
+        'learning_rate': 0.000228,
+        'num_epochs': 115,
+        'dropout_rate': 0.287231916311793,
+        'weight_decay': 0.000166,
+        'num_lstm_layers': 4
     }
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -233,13 +234,24 @@ def train_and_evaluate_cv(X_train, y_train, X_test, y_test, n_splits=5):
         X_val, y_val = torch.FloatTensor(X_val).to(device), torch.LongTensor(y_val.numpy()).to(device)
 
         class_weights = compute_class_weight(
-            class_weight='balanced', classes=np.unique(y_tr.cpu().numpy()), y=y_tr.cpu().numpy()
+            class_weight='balanced',
+            classes=np.unique(y_tr.cpu().numpy()),
+            y=y_tr.cpu().numpy()
         )
 
-        model = CNN_LSTM(sequence_length=20, hidden_size=config['hidden_size'], dropout_rate=config['dropout_rate']).to(
-            device)
+        model = CNN_LSTM(
+            sequence_length=20,
+            hidden_size=config['hidden_size'],
+            dropout_rate=config['dropout_rate'],
+            num_lstm_layers=config['num_lstm_layers']
+        ).to(device)
+
         criterion = nn.CrossEntropyLoss(weight=torch.FloatTensor(class_weights).to(device))
-        optimizer = torch.optim.Adam(model.parameters(), lr=config['learning_rate'])
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=config['learning_rate'],
+            weight_decay=config['weight_decay']
+        )
 
         train_loader = DataLoader(TensorDataset(X_tr, y_tr), batch_size=config['batch_size'], shuffle=True)
         val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=config['batch_size'])
@@ -247,26 +259,42 @@ def train_and_evaluate_cv(X_train, y_train, X_test, y_test, n_splits=5):
         best_val_f1, best_model_state = 0, None
         train_losses, val_losses, val_accuracies, val_f1s = [], [], [], []
 
+        # Training loop
         for epoch in range(config['num_epochs']):
+            # Training phase
             model.train()
-            total_train_loss = sum(
-                criterion(model(seq), labels).backward() or optimizer.step() or criterion(model(seq), labels).item() for
-                seq, labels in train_loader) / len(train_loader)
-            train_losses.append(total_train_loss)
+            total_train_loss = 0
+            for seq, labels in train_loader:
+                optimizer.zero_grad()
+                outputs = model(seq)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                total_train_loss += loss.item()
 
+            avg_train_loss = total_train_loss / len(train_loader)
+            train_losses.append(avg_train_loss)
+
+            # Validation phase
             model.eval()
-            val_preds, val_labels, total_val_loss = [], [], 0
+            total_val_loss = 0
+            epoch_val_preds = []
+            epoch_val_labels = []
+
             with torch.no_grad():
                 for seq, labels in val_loader:
                     outputs = model(seq)
-                    total_val_loss += criterion(outputs, labels).item()
-                    val_preds.extend(torch.argmax(outputs, 1).cpu().numpy())
-                    val_labels.extend(labels.cpu().numpy())
+                    loss = criterion(outputs, labels)
+                    total_val_loss += loss.item()
+                    epoch_val_preds.extend(torch.argmax(outputs, 1).cpu().numpy())
+                    epoch_val_labels.extend(labels.cpu().numpy())
 
             avg_val_loss = total_val_loss / len(val_loader)
             val_losses.append(avg_val_loss)
-            val_accuracy = accuracy_score(val_labels, val_preds)
-            val_f1 = f1_score(val_labels, val_preds, average='weighted')
+
+            # Calculate validation metrics
+            val_accuracy = accuracy_score(epoch_val_labels, epoch_val_preds)
+            val_f1 = f1_score(epoch_val_labels, epoch_val_preds, average='weighted')
 
             val_accuracies.append(val_accuracy)
             val_f1s.append(val_f1)
@@ -276,7 +304,12 @@ def train_and_evaluate_cv(X_train, y_train, X_test, y_test, n_splits=5):
                 best_model_state = model.state_dict().copy()
 
             print(
-                f'Epoch {epoch + 1}/{config["num_epochs"]}, Loss: {total_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.4f}, Val F1: {val_f1:.4f}')
+                f'Epoch {epoch + 1}/{config["num_epochs"]}, '
+                f'Loss: {avg_train_loss:.4f}, '
+                f'Val Loss: {avg_val_loss:.4f}, '
+                f'Val Acc: {val_accuracy:.4f}, '
+                f'Val F1: {val_f1:.4f}'
+            )
 
         plot_learning_curves(train_losses, val_losses, val_accuracies, val_f1s, fold)
         all_folds_train_losses.append(train_losses)
@@ -306,6 +339,9 @@ def train_and_evaluate_cv(X_train, y_train, X_test, y_test, n_splits=5):
     print("\nEvaluating on test set:")
     model.load_state_dict(best_model_state)
     model.eval()
+
+    X_test = torch.FloatTensor(X_test).to(device)
+    y_test = torch.LongTensor(y_test).to(device)
     test_loader = DataLoader(TensorDataset(X_test, y_test), batch_size=config['batch_size'])
 
     test_preds, test_labels = [], []
@@ -321,7 +357,23 @@ def train_and_evaluate_cv(X_train, y_train, X_test, y_test, n_splits=5):
     print("\nTest Classification Report:")
     print(classification_report(test_labels, test_preds, digits=4))
 
-    return fold_metrics
+    test_metrics = {
+        'Test Accuracy': accuracy_score(test_labels, test_preds),
+        'Test F1 Score': f1_score(test_labels, test_preds, average='weighted'),
+        'Test Precision': precision_score(test_labels, test_preds, average='weighted'),
+        'Test Recall': recall_score(test_labels, test_preds, average='weighted'),
+        'Classification Report': classification_report(test_labels, test_preds, digits=4)
+    }
+
+    print("\nFinal Test Results:")
+    for metric, value in test_metrics.items():
+        if metric != 'Classification Report':
+            print(f"{metric}: {value:.4f}")
+        else:
+            print(f"\n{metric}:")
+            print(value)
+
+    return fold_metrics, test_metrics
 
 
 if __name__ == "__main__":
